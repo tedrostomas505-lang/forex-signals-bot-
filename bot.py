@@ -104,25 +104,56 @@ def make_hourly(candles):
 
 
 def news_blocked():
-    try:
-        url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
+    now = datetime.now(TZ)
 
-        events = response.json()
-        now = datetime.now(TZ)
+    events = getattr(news_blocked, "_events", None)
+    fetched_at = getattr(news_blocked, "_fetched_at", None)
+    last_attempt = getattr(news_blocked, "_last_attempt", None)
 
-        for event in events:
-            if event.get("impact") != "High":
-                continue
+    should_fetch = (
+        last_attempt is None
+        or (now - last_attempt).total_seconds() >= 1800
+    )
 
-            if event.get("country") not in ("USD", "GBP", "EUR"):
-                continue
+    if should_fetch:
+        news_blocked._last_attempt = now
 
-            date_text = event.get("date")
-            if not date_text:
-                continue
+        try:
+            url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+            response = requests.get(url, timeout=10)
+            response.raise_for_status()
 
+            events = response.json()
+            news_blocked._events = events
+            news_blocked._fetched_at = now
+
+        except Exception as error:
+            print("News calendar error:", error)
+
+            if (
+                events is None
+                or fetched_at is None
+                or (now - fetched_at).total_seconds() > 6 * 3600
+            ):
+                return True
+
+    events = getattr(news_blocked, "_events", None)
+
+    if events is None:
+        return True
+
+    for event in events:
+        if event.get("impact") != "High":
+            continue
+
+        if event.get("country") not in ("USD", "GBP", "EUR"):
+            continue
+
+        date_text = event.get("date")
+        if not date_text:
+            continue
+
+        try:
             event_time = datetime.fromisoformat(
                 date_text.replace("Z", "+00:00")
             ).astimezone(TZ)
@@ -132,11 +163,10 @@ def news_blocked():
             if difference <= 15 * 60:
                 return True
 
-        return False
+        except Exception:
+            continue
 
-    except Exception as error:
-        print("News calendar error:", error)
-        return True
+    return False
 
 
 def get_signal(symbol, name):
