@@ -583,8 +583,7 @@ async def background(app):
 
 
 async def post_init(app):
-    app.create_task(background(app))
-
+    asyncio.create_task(background(app))
 
 def main():
     if not TOKEN:
