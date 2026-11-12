@@ -95,6 +95,10 @@ def make_hourly(candles):
 
     for key in sorted(groups):
         group = groups[key]
+
+        if len(group) != 12:
+            continue
+
         hourly.append({
             "time": key * 3600,
             "open": group[0]["open"],
@@ -104,6 +108,34 @@ def make_hourly(candles):
         })
 
     return hourly
+
+
+def make_4h(candles):
+    groups = {}
+
+    for candle in candles:
+        key = candle["time"] // 14400
+        groups.setdefault(key, []).append(candle)
+
+    result = []
+
+    for key in sorted(groups):
+        group = groups[key]
+
+        if len(group) != 4:
+            continue
+
+        result.append({
+            "time": key * 14400,
+            "open": group[0]["open"],
+            "high": max(c["high"] for c in group),
+            "low": min(c["low"] for c in group),
+            "close": group[-1]["close"]
+        })
+
+    return result
+
+
 
 
 def news_blocked():
