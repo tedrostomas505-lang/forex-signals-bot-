@@ -246,35 +246,29 @@ def get_signal(symbol, name):
 
         if len(hourly) < 30 or len(m30) < 20 or len(m15) < 20:
             return None
-
-         if len(hourly) < 30 or len(m30) < 20 or len(m15) < 20:
-            return None
-
         # ICT liquidity sweep on 1H
-    
+        h = hourly[:-1]
+        last_h = h[-1]
+        previous_h = h[-21:-1]
+
+        if len(previous_h) < 20:
+            return None
 
         four = four_hour[:-1]
         if len(four) < 6:
-            return None       # ICT liquidity sweep on 1H
-h = hourly[:-1]
-last_h = h[-1]
-previous_h = h[-21:-1]
+            return None
 
-four = four_hour[:-1]
-if len(four) < 6:
-    return None
+        last_four = four[-1]
+        previous_four = four[-6:-1]
 
-last_four = four[-1]
-previous_four = four[-6:-1]
+        four_bullish = last_four["close"] > max(
+            c["high"] for c in previous_four
+        )
 
-four_bullish = last_four["close"] > max(
-    c["high"] for c in previous_four
-)
-
-four_bearish = last_four["close"] < min(
-    c["low"] for c in previous_four
-)
-        if len(previous_h) < 20:
+        four_bearish = last_four["close"] < min(
+            c["low"] for c in previous_four
+        )
+     if len(previous_h) < 20:
             return None
 
         old_high = max(c["high"] for c in previous_h)
