@@ -216,9 +216,9 @@ def get_signal(symbol, name):
         if len(five) < 250:
             return None
 
-        # Build higher timeframes from 5-minute data
-        hourly = make_hourly(five)
-
+  # Build higher timeframes from 5-minute data
+hourly = make_hourly(five)
+four_hour = make_4h(hourly)
         def aggregate(data, minutes):
             size = minutes // 5
             result = []
@@ -247,10 +247,24 @@ def get_signal(symbol, name):
             return None
 
         # ICT liquidity sweep on 1H
-        h = hourly[:-1]
-        last_h = h[-1]
-        previous_h = h[-21:-1]
+h = hourly[:-1]
+last_h = h[-1]
+previous_h = h[-21:-1]
 
+four = four_hour[:-1]
+if len(four) < 6:
+    return None
+
+last_four = four[-1]
+previous_four = four[-6:-1]
+
+four_bullish = last_four["close"] > max(
+    c["high"] for c in previous_four
+)
+
+four_bearish = last_four["close"] < min(
+    c["low"] for c in previous_four
+)
         if len(previous_h) < 20:
             return None
 
@@ -329,7 +343,7 @@ def get_signal(symbol, name):
         if entry < midpoint:
             score += 20
 
-        if score >= 80 and buy_sweep and buy_bos:
+        if score >= 80 and buy_sweep and buy_bos and four_bullish:
             direction = "BUY"
             sweep = last_h["low"]
 
@@ -346,7 +360,7 @@ def get_signal(symbol, name):
         if entry > midpoint:
             sell_score += 20
 
-        if sell_score >= 80 and sell_sweep and sell_bos:
+       if sell_score >= 80 and sell_sweep and sell_bos and four_bearish:
             if sell_score > score:
                 direction = "SELL"
                 score = sell_score
@@ -383,7 +397,7 @@ def get_signal(symbol, name):
             f"Stop Loss: {stop:.{digits}f}\n"
             f"Take Profit: {target:.{digits}f}\n\n"
             f"ICT + SMC score: {score}/100\n"
-            f"Timeframes: 1H + 30M + 15M + 5M\n"
+            f"Timeframes: 4H + 1H + 30M + 15M + 5M\n"
             f"Risk/Reward: 1:2\n"
             f"Planned risk: 1%\n\n"
             "Paper trading only. Not financial advice."
