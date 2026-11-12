@@ -247,7 +247,7 @@ def get_signal(symbol, name):
         if risk <= 0:
             return None
 
-        digits = 2 if "Gold" in name else 5
+digits = 3 if "JPY" in name else 5
 
         key = (
             direction,
