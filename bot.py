@@ -251,9 +251,7 @@ def get_signal(symbol, name):
             return None
 
         # ICT liquidity sweep on 1H
-        h = hourly[:-1]
-        last_h = h[-1]
-        previous_h = h[-21:-1]
+    
 
         four = four_hour[:-1]
         if len(four) < 6:
