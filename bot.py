@@ -20,6 +20,10 @@ SYMBOLS = {
     "GBP/JPY": "GBPJPY=X"
 }
 
+CHAT_IDS = set()
+LAST_SIGNALS = {}
+TRADES_FILE = "trades.json"
+
 
 
 
