@@ -13,15 +13,16 @@ from telegram.ext import (
 TOKEN = os.getenv("BOT_TOKEN")
 TZ = ZoneInfo("Asia/Qatar")
 
+
 SYMBOLS = {
-    "GBP/USD": "GBPUSD=X",
     "EUR/USD": "EURUSD=X",
-    "Gold Futures": "GC=F"
+    "Gold": "XAUUSD=X"
 }
 
 CHAT_IDS = set()
 LAST_SIGNALS = {}
 TRADES_FILE = "trades.json"
+
 
 
 def load_trades():
