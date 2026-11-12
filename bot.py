@@ -265,20 +265,20 @@ def get_signal(symbol, name):
             c["high"] for c in previous_four
         )
 
-        four_bearish = last_four["close"] < min(
-            c["low"] for c in previous_four
-        )
-     if len(previous_h) < 20:
-            return None
-
-        old_high = max(c["high"] for c in previous_h)
-        old_low = min(c["low"] for c in previous_h)
-
+       
         buy_sweep = (
             last_h["low"] < old_low
             and last_h["close"] > old_low
         )
+        four_bearish = last_four["close"] < min(
+            c["low"] for c in previous_four
+        )
 
+        if len(previous_h) < 20:
+            return None
+
+        old_high = max(c["high"] for c in previous_h)
+        old_low = min(c["low"] for c in previous_h)
         sell_sweep = (
             last_h["high"] > old_high
             and last_h["close"] < old_high
