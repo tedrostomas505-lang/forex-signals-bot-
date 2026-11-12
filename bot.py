@@ -216,9 +216,10 @@ def get_signal(symbol, name):
         if len(five) < 250:
             return None
 
-  # Build higher timeframes from 5-minute data
-hourly = make_hourly(five)
-four_hour = make_4h(hourly)
+         # Build higher timeframes from 5-minute data
+        hourly = make_hourly(five)
+        four_hour = make_4h(hourly)
+
         def aggregate(data, minutes):
             size = minutes // 5
             result = []
