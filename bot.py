@@ -358,7 +358,8 @@ def get_signal(symbol, name):
             sell_score += 20
         if bearish_fvg:
             sell_score += 20
-                if bearish_ob:
+   
+                direction = "SE          if bearish_ob:
             sell_score += 15
         if entry > midpoint:
             sell_score += 20
@@ -367,7 +368,7 @@ def get_signal(symbol, name):
             if sell_score > score:
                 direction = "SELL"
                 score = sell_score
-                sweep = last_h["high"]
+                sweep = last_h["high"]        
         if direction is None:
             return None
 
