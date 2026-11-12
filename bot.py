@@ -14,14 +14,12 @@ TOKEN = os.getenv("BOT_TOKEN")
 TZ = ZoneInfo("Asia/Qatar")
 
 
+
 SYMBOLS = {
     "EUR/USD": "EURUSD=X",
-    "Gold": "XAUUSD=X"
+    "GBP/JPY": "GBPJPY=X"
 }
 
-CHAT_IDS = set()
-LAST_SIGNALS = {}
-TRADES_FILE = "trades.json"
 
 
 
