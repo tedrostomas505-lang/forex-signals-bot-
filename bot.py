@@ -171,7 +171,6 @@ def news_blocked():
 
     return False
 
-
 def get_signal(symbol, name):
     try:
         candles = get_candles(symbol)
@@ -179,75 +178,165 @@ def get_signal(symbol, name):
         if len(candles) < 300:
             return None
 
-        # Ignore unfinished 5-minute candle
+        # Remove unfinished 5-minute candle
         five = candles[:-1]
 
-        # Build 1-hour candles
+        if len(five) < 250:
+            return None
+
+        # Build higher timeframes from 5-minute data
         hourly = make_hourly(five)
 
-        # Ignore unfinished 1-hour candle
-        hourly = hourly[:-1]
+        def aggregate(data, minutes):
+            size = minutes // 5
+            result = []
 
-        if len(hourly) < 25 or len(five) < 20:
+            for i in range(0, len(data) - size + 1, size):
+                group = data[i:i + size]
+
+                if len(group) != size:
+                    continue
+
+                result.append({
+                    "time": group[0]["time"],
+                    "open": group[0]["open"],
+                    "high": max(c["high"] for c in group),
+                    "low": min(c["low"] for c in group),
+                    "close": group[-1]["close"]
+                })
+
+            return result
+
+        m30 = aggregate(five, 30)
+        m15 = aggregate(five, 15)
+        m5 = five
+
+        if len(hourly) < 30 or len(m30) < 20 or len(m15) < 20:
             return None
 
-        last1h = hourly[-1]
-        previous1h = hourly[-21:-1]
+        # ICT liquidity sweep on 1H
+        h = hourly[:-1]
+        last_h = h[-1]
+        previous_h = h[-21:-1]
 
-        support = min(c["low"] for c in previous1h)
-        resistance = max(c["high"] for c in previous1h)
-
-        last5 = five[-1]
-        previous5 = five[-7:-1]
-
-        break_high = max(c["high"] for c in previous5)
-        break_low = min(c["low"] for c in previous5)
-
-        direction = None
-        sweep = None
-        score = 0
-
-        # BUY: 1H liquidity sweep and reclaim
-        if (
-            last1h["low"] < support
-            and last1h["close"] > support
-            and last5["close"] > break_high
-        ):
-            direction = "BUY"
-            sweep = last1h["low"]
-            score = 75
-
-        # SELL: 1H liquidity sweep and reclaim
-        elif (
-            last1h["high"] > resistance
-            and last1h["close"] < resistance
-            and last5["close"] < break_low
-        ):
-            direction = "SELL"
-            sweep = last1h["high"]
-            score = 75
-
-        if direction is None or score < 65:
+        if len(previous_h) < 20:
             return None
+
+        old_high = max(c["high"] for c in previous_h)
+        old_low = min(c["low"] for c in previous_h)
+
+        buy_sweep = (
+            last_h["low"] < old_low
+            and last_h["close"] > old_low
+        )
+
+        sell_sweep = (
+            last_h["high"] > old_high
+            and last_h["close"] < old_high
+        )
+
+        # Market structure: BOS / CHoCH approximation
+        recent = m15[:-1]
+        if len(recent) < 10:
+            return None
+
+        last15 = recent[-1]
+        structure = recent[-10:-1]
+
+        structure_high = max(c["high"] for c in structure)
+        structure_low = min(c["low"] for c in structure)
+
+        buy_bos = last15["close"] > structure_high
+        sell_bos = last15["close"] < structure_low
+
+        # Fair Value Gap on 5M
+        if len(m5) < 5:
+            return None
+
+        a = m5[-4]
+        c = m5[-2]
+
+        bullish_fvg = c["low"] > a["high"]
+        bearish_fvg = c["high"] < a["low"]
+
+        # Order block approximation
+        previous = m5[-3]
+        last5 = m5[-1]
+
+        bullish_ob = (
+            previous["close"] < previous["open"]
+            and last5["close"] > previous["high"]
+        )
+
+        bearish_ob = (
+            previous["close"] > previous["open"]
+            and last5["close"] < previous["low"]
+        )
+
+        # Premium / Discount using recent 1H range
+        range_high = max(x["high"] for x in h[-20:])
+        range_low = min(x["low"] for x in h[-20:])
+        midpoint = (range_high + range_low) / 2
 
         entry = last5["close"]
+        digits = 3 if "JPY" in name else 5
 
+        direction = None
+        score = 0
+        sweep = None
+
+        # ICT + SMC BUY
+        if buy_sweep:
+            score += 25
+        if buy_bos:
+            score += 20
+        if bullish_fvg:
+            score += 20
+        if bullish_ob:
+            score += 15
+        if entry < midpoint:
+            score += 20
+
+        if score >= 80 and buy_sweep and buy_bos:
+            direction = "BUY"
+            sweep = last_h["low"]
+
+        # ICT + SMC SELL
+        sell_score = 0
+        if sell_sweep:
+            sell_score += 25
+        if sell_bos:
+            sell_score += 20
+        if bearish_fvg:
+            sell_score += 20
+        if bearish_ob:
+            sell_score += 15
+        if entry > midpoint:
+            sell_score += 20
+
+        if sell_score >= 80 and sell_sweep and sell_bos:
+            if sell_score > score:
+                direction = "SELL"
+                score = sell_score
+                sweep = last_h["high"]
+
+        if direction is None:
+            return None
+
+        # Stop loss and 1:2 target
         if direction == "BUY":
-            stop = min(sweep, min(c["low"] for c in five[-4:]))
+            stop = min(sweep, min(x["low"] for x in m5[-4:]))
             stop -= entry * 0.0002
             risk = entry - stop
             target = entry + (risk * 2)
-
         else:
-            stop = max(sweep, max(c["high"] for c in five[-4:]))
+            stop = max(sweep, max(x["high"] for x in m5[-4:]))
             stop += entry * 0.0002
             risk = stop - entry
             target = entry - (risk * 2)
 
         if risk <= 0:
             return None
-
-digits = 3 if "JPY" in name else 5
 
         key = (
             direction,
@@ -261,8 +350,8 @@ digits = 3 if "JPY" in name else 5
             f"Entry: {entry:.{digits}f}\n"
             f"Stop Loss: {stop:.{digits}f}\n"
             f"Take Profit: {target:.{digits}f}\n\n"
-            f"Setup score: {score}/100\n"
-            f"Timeframes: 1H + 5M\n"
+            f"ICT + SMC score: {score}/100\n"
+            f"Timeframes: 1H + 30M + 15M + 5M\n"
             f"Risk/Reward: 1:2\n"
             f"Planned risk: 1%\n\n"
             "Paper trading only. Not financial advice."
@@ -283,6 +372,7 @@ digits = 3 if "JPY" in name else 5
     except Exception as error:
         print("Analysis error:", name, error)
         return None
+
 
 
 def update_trade_results():
