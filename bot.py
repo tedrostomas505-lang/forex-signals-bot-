@@ -247,7 +247,17 @@ def get_signal(symbol, name):
         if len(hourly) < 30 or len(m30) < 20 or len(m15) < 20:
             return None
 
+         if len(hourly) < 30 or len(m30) < 20 or len(m15) < 20:
+            return None
+
         # ICT liquidity sweep on 1H
+        h = hourly[:-1]
+        last_h = h[-1]
+        previous_h = h[-21:-1]
+
+        four = four_hour[:-1]
+        if len(four) < 6:
+            return None       # ICT liquidity sweep on 1H
 h = hourly[:-1]
 last_h = h[-1]
 previous_h = h[-21:-1]
