@@ -533,16 +533,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Use /signal to check."
     )
 
-
-async def background(app):
-    last_report_date = None
-
-    while True:
-        await asyncio.sleep(300)
-
-        await asyncio.to_thread(update_trade_results)
-
         now = datetime.now(TZ)
+
+        if now.hour == 23 and now.minute >= 30:
+            if last_report_date != now.date():
+                await daily_report(app)
+                last_report_date = now.date()
 
       if now.hour == 23 and now.minute >= 30:
             if last_report_date != now.date():
