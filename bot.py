@@ -597,13 +597,14 @@ def main():
         print("BOT_TOKEN is missing")
         return
 
-    app = ( 
+      app = (
         Application.builder()
         .token(TOKEN)
         .post_init(post_init)
+        .post_shutdown(post_shutdown)
         .build()
     )
-.post_shutdown(post_shutdown)
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("signal", signal))
 
