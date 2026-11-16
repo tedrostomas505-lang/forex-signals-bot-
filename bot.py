@@ -209,7 +209,8 @@ def get_signal(symbol, name):
 
         if len(candles) < 300:
             return None
-
+if len(candles) < 300:
+    return None
         # Remove unfinished 5-minute candle
         five = candles[:-1]
 
