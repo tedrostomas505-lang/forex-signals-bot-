@@ -580,20 +580,30 @@ async def background(app):
 
 
 async def post_init(app):
-    asyncio.create_task(background(app))
+    app.background_task = asyncio.create_task(background(app))
+
+
+async def post_shutdown(app):
+    task = getattr(app, "background_task", None)
+    if task:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
 def main():
     if not TOKEN:
         print("BOT_TOKEN is missing")
         return
 
-    app = (
+    app = ( 
         Application.builder()
         .token(TOKEN)
         .post_init(post_init)
         .build()
     )
-
+.post_shutdown(post_shutdown)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("signal", signal))
 
