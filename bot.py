@@ -521,7 +521,6 @@ async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "No confirmed setup right now."
         )
 
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     CHAT_IDS.add(update.effective_chat.id)
 
@@ -529,18 +528,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Forex Signal Bot active!\n"
         "Analysis: 1H\n"
         "Entry: 5M\n"
-        "Trading hours: 08:00-20:00 Qatar time.\n"
+        "Trading hours: 02:00-23:00 Qatar time.\n"
+        "Daily report: 23:30 Qatar time.\n"
         "Use /signal to check."
     )
+
+
+async def background(app):
+    last_report_date = None
+
+    while True:
+        await asyncio.sleep(300)
+
+        await asyncio.to_thread(update_trade_results)
 
         now = datetime.now(TZ)
 
         if now.hour == 23 and now.minute >= 30:
-            if last_report_date != now.date():
-                await daily_report(app)
-                last_report_date = now.date()
-
-      if now.hour == 23 and now.minute >= 30:
             if last_report_date != now.date():
                 await daily_report(app)
                 last_report_date = now.date()
@@ -573,8 +577,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             save_trades(trades)
 
             LAST_SIGNALS[name] = key
-
-
 
 async def post_init(app):
     app.bot_data["background_task"] = asyncio.create_task(background(app))
