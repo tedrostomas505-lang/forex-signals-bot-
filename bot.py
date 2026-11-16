@@ -579,12 +579,16 @@ async def background(app):
             LAST_SIGNALS[name] = key
 
 
+
 async def post_init(app):
-    app.background_task = asyncio.create_task(background(app))
+    app.bot_data["background_task"] = asyncio.create_task(background(app))
+
+
 
 
 async def post_shutdown(app):
-    task = getattr(app, "background_task", None)
+    task = app.bot_data.pop("background_task", None)
+
     if task:
         task.cancel()
         try:
