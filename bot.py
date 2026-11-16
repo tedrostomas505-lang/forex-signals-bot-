@@ -592,12 +592,13 @@ async def post_shutdown(app):
         except asyncio.CancelledError:
             pass
 
+
 def main():
     if not TOKEN:
         print("BOT_TOKEN is missing")
         return
 
-      app = (
+    app = (
         Application.builder()
         .token(TOKEN)
         .post_init(post_init)
