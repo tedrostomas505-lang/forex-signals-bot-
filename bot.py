@@ -42,7 +42,7 @@ def save_trades(trades):
 
 def trading_hours():
     now = datetime.now(TZ).time()
-    return time(8, 0) <= now <= time(20, 0)
+    return time(2, 0) <= now <= time(23, 0)
 
 
 def get_candles(symbol):
@@ -544,7 +544,7 @@ async def background(app):
 
         now = datetime.now(TZ)
 
-        if now.hour == 20 and now.minute >= 5:
+      if now.hour == 23 and now.minute >= 30:
             if last_report_date != now.date():
                 await daily_report(app)
                 last_report_date = now.date()
