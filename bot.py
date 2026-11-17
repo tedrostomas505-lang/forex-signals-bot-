@@ -330,9 +330,8 @@ def get_signal(symbol, name):
         direction = None
         score = 0
         sweep = None
-
         # ICT + SMC BUY
-              if buy_sweep:
+        if buy_sweep:
             score += 25
         if buy_bos:
             score += 20
@@ -346,12 +345,14 @@ def get_signal(symbol, name):
         if score >= 70 and buy_sweep and buy_bos and four_bullish:
             direction = "BUY"
             sweep = last_h["low"]
+
         # ICT + SMC SELL
         sell_score = 0
         if sell_sweep:
             sell_score += 25
         if sell_bos:
             sell_score += 20
+      
         if bearish_fvg:
             sell_score += 20
         if bearish_ob:
