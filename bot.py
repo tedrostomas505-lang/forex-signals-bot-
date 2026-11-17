@@ -332,7 +332,7 @@ def get_signal(symbol, name):
         sweep = None
 
         # ICT + SMC BUY
-        if buy_sweep:
+              if buy_sweep:
             score += 25
         if buy_bos:
             score += 20
@@ -343,7 +343,7 @@ def get_signal(symbol, name):
         if entry < midpoint:
             score += 20
 
-      if score >= 70 and buy_sweep and buy_bos and four_bullish:
+        if score >= 70 and buy_sweep and buy_bos and four_bullish:
             direction = "BUY"
             sweep = last_h["low"]
         # ICT + SMC SELL
