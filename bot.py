@@ -1,424 +1,499 @@
-import os
+from pathlib import Path
+
+code = r'''import os
 import json
+import logging
 import asyncio
-import requests
-from datetime import datetime, time
+from datetime import datetime, timedelta, timezone, time as dt_time
 from zoneinfo import ZoneInfo
 
+import requests
 from telegram import Update
 from telegram.ext import (
     Application, CommandHandler, ContextTypes
 )
 
+# ============================================================
+# FOREX SMC SIGNAL BOT
+# Symbols: EUR/USD and GBP/JPY
+# Signals only. No automatic trading or order execution.
+# ============================================================
+
 TOKEN = os.getenv("BOT_TOKEN")
-TZ = ZoneInfo("Asia/Qatar")
-
-
+if not TOKEN:
+    raise RuntimeError("BOT_TOKEN environment variable is missing.")
 
 SYMBOLS = {
     "EUR/USD": "EURUSD=X",
-    "GBP/JPY": "GBPJPY=X"
+    "GBP/JPY": "GBPJPY=X",
 }
+
+QATAR = ZoneInfo("Asia/Qatar")
+UTC = timezone.utc
+
+RISK_PERCENT = 1.0
+REWARD_RISK = 2.0
+MIN_SCORE = 70
+TRADING_START_HOUR = 2
+TRADING_END_HOUR = 23
+DAILY_REPORT_HOUR = 23
+DAILY_REPORT_MINUTE = 30
+
+DATA_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{}"
+NEWS_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+TRADES_FILE = "trades.json"
+
+logging.basicConfig(
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    level=logging.INFO,
+)
+logger = logging.getLogger("forex_smc_bot")
 
 CHAT_IDS = set()
 LAST_SIGNALS = {}
-TRADES_FILE = "trades.json"
+NEWS_CACHE = {"checked": None, "events": None}
+LAST_REPORT_DATE = None
 
 
-
-
-def load_trades():
-    try:
-        with open(TRADES_FILE, "r") as f:
-            return json.load(f)
-    except Exception:
-        return []
-
-
-def save_trades(trades):
-    with open(TRADES_FILE, "w") as f:
-        json.dump(trades, f, indent=2)
-
-
-def trading_hours():
-    now = datetime.now(TZ).time()
-    return time(2, 0) <= now <= time(23, 0)
-
+# ------------------------- DATA -----------------------------
 
 def get_candles(symbol):
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+    """Download 5-minute candles from Yahoo Finance."""
     params = {"range": "60d", "interval": "5m"}
     headers = {"User-Agent": "Mozilla/5.0"}
 
     response = requests.get(
-        url, params=params, headers=headers, timeout=20
+        DATA_URL.format(symbol),
+        params=params,
+        headers=headers,
+        timeout=20,
     )
     response.raise_for_status()
+    payload = response.json()
 
-    result = response.json()["chart"]["result"][0]
-    timestamps = result["timestamp"]
-    quote = result["indicators"]["quote"][0]
+    result = payload.get("chart", {}).get("result")
+    if not result:
+        raise ValueError("Yahoo Finance returned no candle data.")
+
+    item = result[0]
+    timestamps = item.get("timestamp") or []
+    quote = item.get("indicators", {}).get("quote", [{}])[0]
 
     candles = []
-
     for i, stamp in enumerate(timestamps):
         try:
-            values = [
-                quote["open"][i],
-                quote["high"][i],
-                quote["low"][i],
-                quote["close"][i]
-            ]
-
-            if all(v is not None for v in values):
-                candles.append({
-                    "time": stamp,
-                    "open": values[0],
-                    "high": values[1],
-                    "low": values[2],
-                    "close": values[3]
-                })
-        except (IndexError, TypeError):
+            o = quote["open"][i]
+            h = quote["high"][i]
+            low = quote["low"][i]
+            c = quote["close"][i]
+            if None in (o, h, low, c):
+                continue
+            candles.append({
+                "time": datetime.fromtimestamp(stamp, UTC),
+                "open": float(o),
+                "high": float(h),
+                "low": float(low),
+                "close": float(c),
+            })
+        except (IndexError, TypeError, ValueError):
             continue
 
+    candles.sort(key=lambda x: x["time"])
+    if len(candles) < 300:
+        raise ValueError("Not enough 5-minute candles received.")
     return candles
 
 
-def make_hourly(candles):
+def completed_5m_candles(candles):
+    """Exclude the currently forming 5-minute candle."""
+    now = datetime.now(UTC)
+    return [c for c in candles if c["time"] + timedelta(minutes=5) <= now]
+
+
+def build_timeframe(candles, minutes):
+    """Aggregate complete, UTC-aligned bars from 5-minute candles."""
+    step = minutes * 60
+    expected = minutes // 5
     groups = {}
 
     for candle in candles:
-        key = candle["time"] // 3600
-        groups.setdefault(key, []).append(candle)
+        stamp = int(candle["time"].timestamp())
+        bucket = (stamp // step) * step
+        groups.setdefault(bucket, []).append(candle)
 
-    hourly = []
-
-    for key in sorted(groups):
-        group = groups[key]
-
-        if len(group) != 12:
+    output = []
+    for bucket in sorted(groups):
+        group = sorted(groups[bucket], key=lambda x: x["time"])
+        if len(group) != expected:
             continue
 
-        hourly.append({
-            "time": key * 3600,
+        # Ensure every 5-minute candle is present and consecutive.
+        expected_times = [
+            datetime.fromtimestamp(bucket + i * 300, UTC)
+            for i in range(expected)
+        ]
+        if [x["time"] for x in group] != expected_times:
+            continue
+
+        output.append({
+            "time": datetime.fromtimestamp(bucket, UTC),
             "open": group[0]["open"],
-            "high": max(c["high"] for c in group),
-            "low": min(c["low"] for c in group),
-            "close": group[-1]["close"]
+            "high": max(x["high"] for x in group),
+            "low": min(x["low"] for x in group),
+            "close": group[-1]["close"],
         })
 
-    return hourly
+    return output
 
 
-def make_4h(candles):
-    groups = {}
+# ---------------------- SMC HELPERS -------------------------
 
-    for candle in candles:
-        key = candle["time"] // 14400
-        groups.setdefault(key, []).append(candle)
+def bullish_bos(candles, lookback=10):
+    if len(candles) < lookback + 2:
+        return False
+    previous = candles[-lookback-1:-1]
+    current = candles[-1]
+    return current["close"] > max(x["high"] for x in previous)
 
-    result = []
 
-    for key in sorted(groups):
-        group = groups[key]
+def bearish_bos(candles, lookback=10):
+    if len(candles) < lookback + 2:
+        return False
+    previous = candles[-lookback-1:-1]
+    current = candles[-1]
+    return current["close"] < min(x["low"] for x in previous)
 
-        if len(group) != 4:
-            continue
 
-        result.append({
-            "time": key * 14400,
-            "open": group[0]["open"],
-            "high": max(c["high"] for c in group),
-            "low": min(c["low"] for c in group),
-            "close": group[-1]["close"]
-        })
-
-    return result
-
-
-
-
-def news_blocked():
-    now = datetime.now(TZ)
-
-    events = getattr(news_blocked, "_events", None)
-    fetched_at = getattr(news_blocked, "_fetched_at", None)
-    last_attempt = getattr(news_blocked, "_last_attempt", None)
-
-    should_fetch = (
-        last_attempt is None
-        or (now - last_attempt).total_seconds() >= 1800
-    )
-
-    if should_fetch:
-        news_blocked._last_attempt = now
-
-        try:
-            url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
-            response = requests.get(url, timeout=10)
-            response.raise_for_status()
-
-            events = response.json()
-            news_blocked._events = events
-            news_blocked._fetched_at = now
-
-        except Exception as error:
-            print("News calendar error:", error)
-
-            if (
-                events is None
-                or fetched_at is None
-                or (now - fetched_at).total_seconds() > 6 * 3600
-            ):
-                return True
-
-    events = getattr(news_blocked, "_events", None)
-
-    if events is None:
-        return True
-
-    for event in events:
-        if event.get("impact") != "High":
-            continue
-
-        if event.get("country") not in ("USD", "GBP", "EUR"):
-            continue
-
-        date_text = event.get("date")
-        if not date_text:
-            continue
-
-        try:
-            event_time = datetime.fromisoformat(
-                date_text.replace("Z", "+00:00")
-            ).astimezone(TZ)
-
-            difference = abs((now - event_time).total_seconds())
-
-            if difference <= 15 * 60:
-                return True
-
-        except Exception:
-            continue
-
-    return False
-
-def get_signal(symbol, name):
-    try:
-        candles = get_candles(symbol)
-
-        if len(candles) < 300:
-            return None
-
-        # Remove unfinished 5-minute candle
-        five = candles[:-1]
-
-        if len(five) < 250:
-            return None
-
-         # Build higher timeframes from 5-minute data
-        hourly = make_hourly(five)
-        four_hour = make_4h(hourly)
-
-        def aggregate(data, minutes):
-            size = minutes // 5
-            result = []
-
-            for i in range(0, len(data) - size + 1, size):
-                group = data[i:i + size]
-
-                if len(group) != size:
-                    continue
-
-                result.append({
-                    "time": group[0]["time"],
-                    "open": group[0]["open"],
-                    "high": max(c["high"] for c in group),
-                    "low": min(c["low"] for c in group),
-                    "close": group[-1]["close"]
-                })
-
-            return result
-
-        m30 = aggregate(five, 30)
-        m15 = aggregate(five, 15)
-        m5 = five
-
-        if len(hourly) < 30 or len(m30) < 20 or len(m15) < 20:
-            return None
-             # ICT liquidity sweep on 1H
-        h = hourly[:-1]
-        last_h = h[-1]
-        previous_h = h[-21:-1]
-
-        if len(previous_h) < 20:
-            return None
-
-        four = four_hour[:-1]
-        if len(four) < 6:
-            return None
-
-        last_four = four[-1]
-        previous_four = four[-6:-1]
-
-        four_bullish = last_four["close"] > max(
-            c["high"] for c in previous_four
-        )
-
-        old_high = max(c["high"] for c in previous_h)
-        old_low = min(c["low"] for c in previous_h)
-
-        buy_sweep = (
-            last_h["low"] < old_low
-            and last_h["close"] > old_low
-        )
-
-        sell_sweep = (
-            last_h["high"] > old_high
-            and last_h["close"] < old_high
-        )
-
-        four_bearish = last_four["close"] < min(
-            c["low"] for c in previous_four
-        )
-        # Market structure: BOS / CHoCH approximation
-        recent = m15[:-1]
-        if len(recent) < 10:
-            return None
-
-        last15 = recent[-1]
-        structure = recent[-10:-1]
-
-        structure_high = max(c["high"] for c in structure)
-        structure_low = min(c["low"] for c in structure)
-
-        buy_bos = last15["close"] > structure_high
-        sell_bos = last15["close"] < structure_low
-
-        # Fair Value Gap on 5M
-        if len(m5) < 5:
-            return None
-
-        a = m5[-4]
-        c = m5[-2]
-
-        bullish_fvg = c["low"] > a["high"]
-        bearish_fvg = c["high"] < a["low"]
-
-        # Order block approximation
-        previous = m5[-3]
-        last5 = m5[-1]
-
-        bullish_ob = (
-            previous["close"] < previous["open"]
-            and last5["close"] > previous["high"]
-        )
-
-        bearish_ob = (
-            previous["close"] > previous["open"]
-            and last5["close"] < previous["low"]
-        )
-
-        # Premium / Discount using recent 1H range
-        range_high = max(x["high"] for x in h[-20:])
-        range_low = min(x["low"] for x in h[-20:])
-        midpoint = (range_high + range_low) / 2
-
-        entry = last5["close"]
-        digits = 3 if "JPY" in name else 5
-
-        direction = None
-        score = 0
-        sweep = None
-        # ICT + SMC BUY
-        if buy_sweep:
-            score += 25
-        if buy_bos:
-            score += 20
-        if bullish_fvg:
-            score += 20
-        if bullish_ob:
-            score += 15
-        if entry < midpoint:
-            score += 20
-
-        if score >= 70 and buy_sweep and buy_bos and four_bullish:
-            direction = "BUY"
-            sweep = last_h["low"]
-
-        # ICT + SMC SELL
-        sell_score = 0
-        if sell_sweep:
-            sell_score += 25
-        if sell_bos:
-            sell_score += 20
-      
-        if bearish_fvg:
-            sell_score += 20
-        if bearish_ob:
-            sell_score += 15
-        if entry > midpoint:
-            sell_score += 20
-
-        if sell_score >= 80 and sell_sweep and sell_bos and four_bearish:
-            if sell_score > score:
-                direction = "SELL"
-                score = sell_score
-                sweep = last_h["high"]
-              
-        if direction is None:
-            return None
-
-        # Stop loss and 1:2 target
-        if direction == "BUY":
-            stop = min(sweep, min(x["low"] for x in m5[-4:]))
-            stop -= entry * 0.0002
-            risk = entry - stop
-            target = entry + (risk * 2)
-        else:
-            stop = max(sweep, max(x["high"] for x in m5[-4:]))
-            stop += entry * 0.0002
-            risk = stop - entry
-            target = entry - (risk * 2)
-
-        if risk <= 0:
-            return None
-
-        key = (
-            direction,
-            round(entry, digits),
-            round(sweep, digits)
-        )
-
-        message = (
-            f"{name}\n"
-            f"Signal: {direction}\n\n"
-            f"Entry: {entry:.{digits}f}\n"
-            f"Stop Loss: {stop:.{digits}f}\n"
-            f"Take Profit: {target:.{digits}f}\n\n"
-            f"ICT + SMC score: {score}/100\n"
-            f"Timeframes: 4H + 1H + 30M + 15M + 5M\n"
-            f"Risk/Reward: 1:2\n"
-            f"Planned risk: 1%\n\n"
-            "Paper trading only. Not financial advice."
-        )
-
-        trade = {
-            "symbol": name,
-            "direction": direction,
-            "entry": entry,
-            "stop": stop,
-            "target": target,
-            "status": "OPEN",
-            "date": datetime.now(TZ).date().isoformat()
-        }
-
-        return key, message, trade
-
-    except Exception as error:
-        print("Analysis error:", name, error)
+def find_fvg(candles, direction, lookback=8):
+    """Return the newest three-candle FVG (simple mechanical definition)."""
+    if len(candles) < 3:
         return None
 
+    start = max(2, len(candles) - lookback)
+    for i in range(len(candles) - 1, start - 1, -1):
+        first = candles[i - 2]
+        third = candles[i]
+
+        if direction == "BUY" and third["low"] > first["high"]:
+            return {
+                "low": first["high"],
+                "high": third["low"],
+                "time": third["time"],
+            }
+
+        if direction == "SELL" and third["high"] < first["low"]:
+            return {
+                "low": third["high"],
+                "high": first["low"],
+                "time": third["time"],
+            }
+
+    return None
+
+
+def liquidity_sweep(candles, direction, recent=3, lookback=10):
+    """Wick takes a prior high/low, then candle closes back inside."""
+    if len(candles) < recent + lookback + 1:
+        return False
+
+    prior = candles[-(recent + lookback):-recent]
+    recent_candles = candles[-recent:]
+    prior_high = max(x["high"] for x in prior)
+    prior_low = min(x["low"] for x in prior)
+
+    if direction == "BUY":
+        return any(
+            x["low"] < prior_low and x["close"] > prior_low
+            for x in recent_candles
+        )
+
+    return any(
+        x["high"] > prior_high and x["close"] < prior_high
+        for x in recent_candles
+    )
+
+
+def find_order_block(candles, direction, lookback=12):
+    """Find an opposite candle before a later close breaks its range."""
+    if len(candles) < 4:
+        return None
+
+    start = max(0, len(candles) - lookback - 1)
+    for i in range(len(candles) - 2, start - 1, -1):
+        candle = candles[i]
+        later = candles[i + 1:]
+
+        if direction == "BUY" and candle["close"] < candle["open"]:
+            if any(x["close"] > candle["high"] for x in later):
+                return {
+                    "low": candle["low"],
+                    "high": candle["open"],
+                    "time": candle["time"],
+                }
+
+        if direction == "SELL" and candle["close"] > candle["open"]:
+            if any(x["close"] < candle["low"] for x in later):
+                return {
+                    "low": candle["open"],
+                    "high": candle["high"],
+                    "time": candle["time"],
+                }
+
+    return None
+
+
+def find_entry_zone(candles, direction):
+    """The 5m entry area is the overlap of the latest OB and FVG."""
+    ob = find_order_block(candles, direction)
+    fvg = find_fvg(candles, direction, lookback=8)
+
+    if not ob or not fvg:
+        return None
+
+    low = max(ob["low"], fvg["low"])
+    high = min(ob["high"], fvg["high"])
+
+    if low >= high:
+        return None
+
+    return {
+        "low": low,
+        "high": high,
+        "ob_time": ob["time"],
+        "fvg_time": fvg["time"],
+    }
+
+
+# ---------------------- NEWS FILTER -------------------------
+
+def get_high_impact_events():
+    """Cache the calendar for 30 minutes. Fail closed if unavailable."""
+    now = datetime.now(UTC)
+    checked = NEWS_CACHE["checked"]
+
+    if checked and NEWS_CACHE["events"] is not None:
+        if now - checked < timedelta(minutes=30):
+            return NEWS_CACHE["events"]
+
+    response = requests.get(
+        NEWS_URL,
+        headers={"User-Agent": "Mozilla/5.0"},
+        timeout=15,
+    )
+    response.raise_for_status()
+    events = response.json()
+
+    if not isinstance(events, list) or not events:
+        raise ValueError("Economic calendar is empty or invalid.")
+
+    NEWS_CACHE["checked"] = now
+    NEWS_CACHE["events"] = events
+    return events
+
+
+def is_news_blocked(pair):
+    currencies = {
+        "EUR/USD": {"EUR", "USD"},
+        "GBP/JPY": {"GBP", "JPY"},
+    }.get(pair, set())
+
+    try:
+        events = get_high_impact_events()
+    except Exception as exc:
+        logger.warning("Calendar unavailable; blocking signals: %s", exc)
+        return True, "Economic calendar unavailable"
+
+    now = datetime.now(UTC)
+
+    for event in events:
+        try:
+            if str(event.get("impact", "")).lower() != "high":
+                continue
+            currency = str(event.get("country", "")).upper()
+            if currency not in currencies:
+                continue
+
+            date_text = event.get("date")
+            if not date_text:
+                continue
+
+            event_time = datetime.fromisoformat(
+                str(date_text).replace("Z", "+00:00")
+            )
+            if event_time.tzinfo is None:
+                event_time = event_time.replace(tzinfo=UTC)
+            else:
+                event_time = event_time.astimezone(UTC)
+
+            if abs((event_time - now).total_seconds()) <= 15 * 60:
+                title = event.get("title", "High impact news")
+                return True, f"High impact news: {title}"
+        except (TypeError, ValueError):
+            continue
+
+    return False, ""
+
+
+# ---------------------- SIGNAL ENGINE -----------------------
+
+def get_signal(pair, yahoo_symbol):
+    candles_5m = completed_5m_candles(get_candles(yahoo_symbol))
+    candles_15m = build_timeframe(candles_5m, 15)
+    candles_4h = build_timeframe(candles_5m, 240)
+
+    if len(candles_15m) < 20 or len(candles_4h) < 12 or len(candles_5m) < 100:
+        return None, "Not enough completed candles."
+
+    # The newest completed 5m candle is used only for retest confirmation.
+    zone_history = candles_5m[:-1]
+    retest_candle = candles_5m[-1]
+
+    buy_score = 0
+    sell_score = 0
+
+    # 4H: BOS and FVG are both mandatory.
+    h4_buy_bos = bullish_bos(candles_4h)
+    h4_sell_bos = bearish_bos(candles_4h)
+    h4_buy_fvg = find_fvg(candles_4h, "BUY", lookback=8)
+    h4_sell_fvg = find_fvg(candles_4h, "SELL", lookback=8)
+
+    if h4_buy_bos and h4_buy_fvg:
+        buy_score += 25
+    if h4_sell_bos and h4_sell_fvg:
+        sell_score += 25
+
+    # 15m: structure break and liquidity sweep are both mandatory.
+    m15_buy_bos = bullish_bos(candles_15m)
+    m15_sell_bos = bearish_bos(candles_15m)
+    m15_buy_sweep = liquidity_sweep(candles_15m, "BUY")
+    m15_sell_sweep = liquidity_sweep(candles_15m, "SELL")
+
+    if m15_buy_bos and m15_buy_sweep:
+        buy_score += 25
+    if m15_sell_bos and m15_sell_sweep:
+        sell_score += 25
+
+    # 5m: overlapping OB + FVG, formed before the retest candle.
+    buy_zone = find_entry_zone(zone_history, "BUY")
+    sell_zone = find_entry_zone(zone_history, "SELL")
+
+    if buy_zone:
+        buy_score += 30
+    if sell_zone:
+        sell_score += 30
+
+    # Retest must happen after both the OB and FVG have formed.
+    if buy_zone:
+        zone_ready = retest_candle["time"] > max(
+            buy_zone["ob_time"], buy_zone["fvg_time"]
+        )
+        touched = (
+            retest_candle["low"] <= buy_zone["high"]
+            and retest_candle["high"] >= buy_zone["low"]
+        )
+        rejected = retest_candle["close"] > buy_zone["high"]
+        if zone_ready and touched and rejected:
+            buy_score += 10
+        else:
+            buy_zone = None
+
+    if sell_zone:
+        zone_ready = retest_candle["time"] > max(
+            sell_zone["ob_time"], sell_zone["fvg_time"]
+        )
+        touched = (
+            retest_candle["high"] >= sell_zone["low"]
+            and retest_candle["low"] <= sell_zone["high"]
+        )
+        rejected = retest_candle["close"] < sell_zone["low"]
+        if zone_ready and touched and rejected:
+            sell_score += 10
+        else:
+            sell_zone = None
+
+    # Require every timeframe condition, not score alone.
+    buy_valid = (
+        h4_buy_bos and h4_buy_fvg
+        and m15_buy_bos and m15_buy_sweep
+        and buy_zone is not None and buy_score >= MIN_SCORE
+    )
+    sell_valid = (
+        h4_sell_bos and h4_sell_fvg
+        and m15_sell_bos and m15_sell_sweep
+        and sell_zone is not None and sell_score >= MIN_SCORE
+    )
+
+    if buy_valid and sell_valid:
+        return None, "Conflicting BUY and SELL conditions."
+
+    if not buy_valid and not sell_valid:
+        return None, "No confirmed SMC setup right now."
+
+    direction = "BUY" if buy_valid else "SELL"
+    score = buy_score if buy_valid else sell_score
+    zone = buy_zone if buy_valid else sell_zone
+
+    entry = retest_candle["close"]
+    buffer = entry * 0.0002
+
+    recent = candles_5m[-8:]
+    if direction == "BUY":
+        stop_loss = min(zone["low"], min(x["low"] for x in recent)) - buffer
+        risk_distance = entry - stop_loss
+        take_profit = entry + risk_distance * REWARD_RISK
+    else:
+        stop_loss = max(zone["high"], max(x["high"] for x in recent)) + buffer
+        risk_distance = stop_loss - entry
+        take_profit = entry - risk_distance * REWARD_RISK
+
+    if risk_distance <= 0 or take_profit <= 0:
+        return None, "Invalid risk calculation."
+
+    signal = {
+        "pair": pair,
+        "direction": direction,
+        "score": score,
+        "entry": entry,
+        "stop_loss": stop_loss,
+        "take_profit": take_profit,
+        "zone_low": zone["low"],
+        "zone_high": zone["high"],
+        "signal_time": retest_candle["time"].isoformat(),
+        "signal_key": (
+            f"{pair}|{direction}|{retest_candle['time'].isoformat()}|"
+            f"{zone['low']:.6f}|{zone['high']:.6f}"
+        ),
+    }
+    return signal, ""
+
+
+# ---------------------- TRADE JOURNAL -----------------------
+
+def load_trades():
+    try:
+        with open(TRADES_FILE, "r", encoding="utf-8") as file:
+            data = json.load(file)
+        return data if isinstance(data, list) else []
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return []
+
+
+def save_trades(trades):
+    temp_file = TRADES_FILE + ".tmp"
+    with open(temp_file, "w", encoding="utf-8") as file:
+        json.dump(trades, file, indent=2)
+    os.replace(temp_file, TRADES_FILE)
+
+
+def record_signal(signal):
+    trades = load_trades()
+    trades.append({
+        **signal,
+        "status": "OPEN",
+        "result_r": None,
+        "created_at": datetime.now(UTC).isoformat(),
+    })
+    save_trades(trades)
 
 
 def update_trade_results():
@@ -426,195 +501,234 @@ def update_trade_results():
     changed = False
 
     for trade in trades:
-        if trade["status"] != "OPEN":
+        if trade.get("status") != "OPEN":
             continue
 
-        symbol = SYMBOLS.get(trade["symbol"])
+        symbol = SYMBOLS.get(trade.get("pair"))
+        if not symbol:
+            continue
 
         try:
-            candles = get_candles(symbol)
-            candle = candles[-1]
+            candles = completed_5m_candles(get_candles(symbol))
+            entry_time = datetime.fromisoformat(trade["signal_time"])
+            if entry_time.tzinfo is None:
+                entry_time = entry_time.replace(tzinfo=UTC)
 
-            if trade["direction"] == "BUY":
-                hit_stop = candle["low"] <= trade["stop"]
-                hit_target = candle["high"] >= trade["target"]
-            else:
-                hit_stop = candle["high"] >= trade["stop"]
-                hit_target = candle["low"] <= trade["target"]
+            later_candles = [c for c in candles if c["time"] > entry_time]
+            direction = trade["direction"]
+            sl = float(trade["stop_loss"])
+            tp = float(trade["take_profit"])
 
-            # Conservative rule if both levels are touched
-            if hit_stop:
-                trade["status"] = "LOSS"
-                changed = True
-            elif hit_target:
-                trade["status"] = "WIN"
-                changed = True
+            for candle in later_candles:
+                if direction == "BUY":
+                    hit_sl = candle["low"] <= sl
+                    hit_tp = candle["high"] >= tp
+                else:
+                    hit_sl = candle["high"] >= sl
+                    hit_tp = candle["low"] <= tp
 
-        except Exception as error:
-            print("Trade result error:", error)
+                # If SL and TP are both touched in one candle, count it as loss.
+                if hit_sl:
+                    trade["status"] = "LOSS"
+                    trade["result_r"] = -1
+                    trade["closed_at"] = candle["time"].isoformat()
+                    changed = True
+                    break
+                if hit_tp:
+                    trade["status"] = "WIN"
+                    trade["result_r"] = REWARD_RISK
+                    trade["closed_at"] = candle["time"].isoformat()
+                    changed = True
+                    break
+
+        except Exception as exc:
+            logger.warning("Could not update trade %s: %s", trade.get("pair"), exc)
 
     if changed:
         save_trades(trades)
 
 
-async def daily_report(app):
-    today = datetime.now(TZ).date().isoformat()
+def make_daily_report():
     trades = load_trades()
+    today = datetime.now(QATAR).date()
 
-    todays = [t for t in trades if t["date"] == today]
+    todays = []
+    for trade in trades:
+        try:
+            created = datetime.fromisoformat(trade["created_at"])
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=UTC)
+            if created.astimezone(QATAR).date() == today:
+                todays.append(trade)
+        except (KeyError, TypeError, ValueError):
+            continue
 
-    wins = sum(t["status"] == "WIN" for t in todays)
-    losses = sum(t["status"] == "LOSS" for t in todays)
-    opened = sum(t["status"] == "OPEN" for t in todays)
+    wins = sum(1 for x in todays if x.get("status") == "WIN")
+    losses = sum(1 for x in todays if x.get("status") == "LOSS")
+    opened = sum(1 for x in todays if x.get("status") == "OPEN")
+    net_r = sum(float(x.get("result_r") or 0) for x in todays)
+    estimated_percent = net_r * RISK_PERCENT
 
-    net_r = (wins * 2) - losses
-
-    report = (
-        "DAILY REPORT\n\n"
+    return (
+        f"📊 Daily report — {today.isoformat()} (Qatar)\n\n"
         f"Trades: {len(todays)}\n"
         f"Wins: {wins}\n"
         f"Losses: {losses}\n"
-        f"Still open: {opened}\n"
-        f"Net result: {net_r}R\n"
-        f"Estimated result at 1% risk: {net_r}%\n\n"
-        "Paper-trading estimate only."
+        f"Open: {opened}\n"
+        f"Net result: {net_r:+.1f}R\n"
+        f"Estimated result: {estimated_percent:+.1f}% "
+        f"(paper estimate at 1% risk per trade)\n\n"
+        "Note: This is a journal estimate, not verified broker P/L."
     )
 
-    for chat_id in list(CHAT_IDS):
-        await app.bot.send_message(chat_id, report)
+
+# ---------------------- TELEGRAM ----------------------------
+
+def is_trading_time():
+    now = datetime.now(QATAR)
+    return TRADING_START_HOUR <= now.hour < TRADING_END_HOUR
 
 
-async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    CHAT_IDS.add(update.effective_chat.id)
+def format_signal(signal):
+    decimals = 3 if signal["pair"] == "GBP/JPY" else 5
+    return (
+        f"📈 SMC SIGNAL — {signal['pair']}\n\n"
+        f"Direction: {signal['direction']}\n"
+        f"Score: {signal['score']}/100 "
+        "(setup score, NOT win probability)\n\n"
+        f"Entry: {signal['entry']:.{decimals}f}\n"
+        f"Stop Loss: {signal['stop_loss']:.{decimals}f}\n"
+        f"Take Profit: {signal['take_profit']:.{decimals}f}\n"
+        f"Entry zone: {signal['zone_low']:.{decimals}f} – "
+        f"{signal['zone_high']:.{decimals}f}\n\n"
+        f"Risk plan: {RISK_PERCENT:.1f}% | RR 1:{REWARD_RISK:.0f}\n"
+        "Manual trading only. Check the price on Exness before entry.\n"
+        "Data source: Yahoo Finance; price may differ from Exness."
+    )
 
-    if not trading_hours():
-        await update.message.reply_text(
-            "Outside trading hours. Qatar time: 08:00-20:00."
-        )
-        return
 
-    if await asyncio.to_thread(news_blocked):
-        await update.message.reply_text(
-            "Major news window or news calendar unavailable. No new signal."
-        )
-        return
-
-    found = False
-
-    for name, symbol in SYMBOLS.items():
-        result = await asyncio.to_thread(get_signal, symbol, name)
-
-        if result:
-            key, message, trade = result
-
-            if LAST_SIGNALS.get(name) != key:
-                await update.message.reply_text(message)
-
-                trades = load_trades()
-                trades.append(trade)
-                save_trades(trades)
-
-                LAST_SIGNALS[name] = key
-                found = True
-
-    if not found:
-        await update.message.reply_text(
-            "No confirmed setup right now."
-        )
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    CHAT_IDS.add(update.effective_chat.id)
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    CHAT_IDS.add(chat_id)
 
     await update.message.reply_text(
-        "Forex Signal Bot active!\n"
-        "Analysis: 1H\n"
-        "Entry: 5M\n"
-        "Trading hours: 02:00-23:00 Qatar time.\n"
-        "Daily report: 23:30 Qatar time.\n"
-        "Use /signal to check."
+        "Welcome to the Forex SMC Signal Bot.\n\n"
+        "Pairs: EUR/USD and GBP/JPY only\n"
+        "Analysis: 4H + 15M\n"
+        "Entry: 5M OB + FVG retest\n"
+        "Risk plan: 1% | Risk/Reward: 1:2\n"
+        "Trading hours: 02:00–23:00 Qatar time\n"
+        "Daily report: 23:30 Qatar time\n\n"
+        "Commands:\n"
+        "/signal — check for a confirmed setup\n"
+        "/start — register this chat for reports\n\n"
+        "Signals only; the bot does not place trades."
     )
 
 
-async def background(app):
-    last_report_date = None
+async def signal_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    CHAT_IDS.add(chat_id)
+
+    if not is_trading_time():
+        await update.message.reply_text(
+            "Trading time is closed. Qatar hours: 02:00–23:00."
+        )
+        return
+
+    await update.message.reply_text("Checking EUR/USD and GBP/JPY SMC setup...")
+
+    sent = 0
+    for pair, symbol in SYMBOLS.items():
+        try:
+            blocked, reason = is_news_blocked(pair)
+            if blocked:
+                logger.info("%s blocked: %s", pair, reason)
+                continue
+
+            signal, message = await asyncio.to_thread(get_signal, pair, symbol)
+            if not signal:
+                logger.info("%s: %s", pair, message)
+                continue
+
+            key = signal["signal_key"]
+            if LAST_SIGNALS.get(pair) == key:
+                continue
+
+            # Save journal entry before sending the signal.
+            record_signal(signal)
+            LAST_SIGNALS[pair] = key
+            await update.message.reply_text(format_signal(signal))
+            sent += 1
+
+        except Exception:
+            logger.exception("Signal check failed for %s", pair)
+
+    if sent == 0:
+        await update.message.reply_text(
+            "No confirmed setup right now.\n"
+            "The bot waits for every required SMC condition and the 5M retest."
+        )
+
+
+# ---------------------- BACKGROUND --------------------------
+
+async def background_tasks(application: Application):
+    global LAST_REPORT_DATE
 
     while True:
-        await asyncio.sleep(300)
+        try:
+            await asyncio.to_thread(update_trade_results)
+        except Exception:
+            logger.exception("Trade update task failed.")
 
-        await asyncio.to_thread(update_trade_results)
+        now = datetime.now(QATAR)
+        today = now.date()
 
-        now = datetime.now(TZ)
-
-        if now.hour == 23 and now.minute >= 30:
-            if last_report_date != now.date():
-                await daily_report(app)
-                last_report_date = now.date()
-
-        if not trading_hours():
-            continue
-
-        if await asyncio.to_thread(news_blocked):
-            continue
-
-        for name, symbol in SYMBOLS.items():
-            result = await asyncio.to_thread(get_signal, symbol, name)
-
-            if not result:
-                continue
-
-            key, message, trade = result
-
-            if LAST_SIGNALS.get(name) == key:
-                continue
-
+        if (
+            now.hour == DAILY_REPORT_HOUR
+            and now.minute >= DAILY_REPORT_MINUTE
+            and LAST_REPORT_DATE != today
+        ):
+            report = await asyncio.to_thread(make_daily_report)
             for chat_id in list(CHAT_IDS):
                 try:
-                    await app.bot.send_message(chat_id, message)
-                except Exception as error:
-                    print("Telegram send error:", error)
+                    await application.bot.send_message(
+                        chat_id=chat_id,
+                        text=report,
+                    )
+                except Exception:
+                    logger.exception("Could not send daily report to %s", chat_id)
+            LAST_REPORT_DATE = today
 
-            trades = load_trades()
-            trades.append(trade)
-            save_trades(trades)
-
-            LAST_SIGNALS[name] = key
-
-async def post_init(app):
-    app.bot_data["background_task"] = asyncio.create_task(background(app))
+        await asyncio.sleep(60)
 
 
-
-
-async def post_shutdown(app):
-    task = app.bot_data.pop("background_task", None)
-
-    if task:
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+async def post_init(application: Application):
+    application.create_task(background_tasks(application))
 
 
 def main():
-    if not TOKEN:
-        print("BOT_TOKEN is missing")
-        return
-
-    app = (
+    application = (
         Application.builder()
         .token(TOKEN)
         .post_init(post_init)
-        .post_shutdown(post_shutdown)
         .build()
     )
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("signal", signal))
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("signal", signal_command))
 
-    print("Forex signal bot running!")
-    app.run_polling()
+    logger.info("Forex SMC bot is starting.")
+    application.run_polling(
+        allowed_updates=Update.ALL_TYPES,
+        drop_pending_updates=True,
+    )
 
 
 if __name__ == "__main__":
     main()
+'''
+path = Path("/mnt/data/bot.py")
+path.write_text(code, encoding="utf-8")
+print(f"Created {path} ({len(code.splitlines())} lines)")
