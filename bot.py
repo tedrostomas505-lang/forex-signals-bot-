@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 import requests
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
-
+from telegram.request import HTTPXRequest
 # ============================================================
 # FOREX CRT SIGNAL BOT
 # Symbols: EUR/USD and GBP/JPY
@@ -685,9 +685,17 @@ async def post_init(application: Application):
 
 
 def main():
+    request = HTTPXRequest(
+        connect_timeout=30,
+        read_timeout=30,
+        write_timeout=30,
+        pool_timeout=30,
+    )
+
     application = (
         Application.builder()
         .token(TOKEN)
+        .request(request)
         .post_init(post_init)
         .build()
     )
