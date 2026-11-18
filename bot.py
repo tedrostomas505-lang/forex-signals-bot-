@@ -1,6 +1,4 @@
-from pathlib import Path
-
-code = r'''import os
+import os
 import json
 import logging
 import asyncio
@@ -728,7 +726,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-'''
-path = Path("/mnt/data/bot.py")
-path.write_text(code, encoding="utf-8")
-print(f"Created {path} ({len(code.splitlines())} lines)")
