@@ -672,6 +672,7 @@ async def signal_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------------------- BACKGROUND --------------------------
 
+
 async def background_tasks(application: Application):
     global LAST_REPORT_DATE
 
@@ -681,6 +682,45 @@ async def background_tasks(application: Application):
         except Exception:
             logger.exception("Trade update task failed.")
 
+        # Automatically check both pairs every 60 seconds.
+        if is_trading_time():
+            for pair, symbol in SYMBOLS.items():
+                try:
+                    blocked, reason = is_news_blocked(pair)
+                    if blocked:
+                        logger.info("%s blocked: %s", pair, reason)
+                        continue
+
+                    signal, message = await asyncio.to_thread(
+                        get_signal, pair, symbol
+                    )
+
+                    if not signal:
+                        logger.info("%s: %s", pair, message)
+                        continue
+
+                    key = signal["signal_key"]
+                    if LAST_SIGNALS.get(pair) == key:
+                        continue
+
+                    record_signal(signal)
+                    LAST_SIGNALS[pair] = key
+
+                    for chat_id in list(CHAT_IDS):
+                        try:
+                            await application.bot.send_message(
+                                chat_id=chat_id,
+                                text=format_signal(signal),
+                            )
+                        except Exception:
+                            logger.exception(
+                                "Could not send signal to %s", chat_id
+                            )
+
+                except Exception:
+                    logger.exception("Automatic signal check failed for %s", pair)
+
+        # Daily report at 23:30 Qatar time.
         now = datetime.now(QATAR)
         today = now.date()
 
@@ -689,18 +729,24 @@ async def background_tasks(application: Application):
             and now.minute >= DAILY_REPORT_MINUTE
             and LAST_REPORT_DATE != today
         ):
-            report = await asyncio.to_thread(make_daily_report)
-            for chat_id in list(CHAT_IDS):
-                try:
-                    await application.bot.send_message(
-                        chat_id=chat_id,
-                        text=report,
-                    )
-                except Exception:
-                    logger.exception("Could not send daily report to %s", chat_id)
-            LAST_REPORT_DATE = today
+            try:
+                report = await asyncio.to_thread(make_daily_report)
+                for chat_id in list(CHAT_IDS):
+                    try:
+                        await application.bot.send_message(
+                            chat_id=chat_id,
+                            text=report,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Could not send daily report to %s", chat_id
+                        )
+                LAST_REPORT_DATE = today
+            except Exception:
+                logger.exception("Daily report failed.")
 
         await asyncio.sleep(60)
+
 
 
 async def post_init(application: Application):
