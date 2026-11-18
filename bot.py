@@ -289,10 +289,11 @@ def get_high_impact_events():
     return events
 
 
+
 def is_news_blocked(pair):
     currencies = {
         "EUR/USD": {"EUR", "USD"},
-        "GBP/JPY": {"GBP", "JPY"},
+        "GBP/JPY": {"GBP"},
     }.get(pair, set())
 
     try:
