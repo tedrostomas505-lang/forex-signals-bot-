@@ -313,13 +313,13 @@ def detect_crt_setup(candles_15m, candles_4h, direction):
     zone = zone_after_choch(candles_15m, direction, sweep_index, choch_index)
     if zone is None:
         return None, "No valid 15M Order Block or FVG after CHoCH."
-sr = find_support_resistance(candles_4h, direction, zone)
+
+    sr = find_support_resistance(candles_4h, direction, zone)
     if sr is None:
         return None, (
             f"No nearby 4H {'Support' if direction == 'BUY' else 'Resistance'} "
             "confirmation."
         )
-
     # Wait for a retest, then a separate confirmation candle.
     retest_index = None
     for i in range(choch_index + 1, len(candles_15m) - 1):
