@@ -136,7 +136,47 @@ def build_4h_candles(candles_15m):
             "close": group[-1]["close"],
         })
     return output
+def find_support_resistance(candles_4h, direction, zone):
+    """Find a confirmed 4H swing support or resistance near the entry zone."""
+    history = candles_4h[-52:]
+    if len(history) < 7:
+        return None
 
+    levels = []
+
+    # Only use confirmed swing points with two candles on each side.
+    for i in range(2, len(history) - 2):
+        candle = history[i]
+        before = history[i - 2:i]
+        after = history[i + 1:i + 3]
+
+        if direction == "BUY":
+            if all(candle["low"] <= x["low"] for x in before + after):
+                levels.append(candle["low"])
+        else:
+            if all(candle["high"] >= x["high"] for x in before + after):
+                levels.append(candle["high"])
+
+    if not levels:
+        return None
+
+    midpoint = (zone["low"] + zone["high"]) / 2
+    tolerance = midpoint * 0.0015
+
+    def distance_to_zone(level):
+        if zone["low"] <= level <= zone["high"]:
+            return 0
+        return min(abs(level - zone["low"]), abs(level - zone["high"]))
+
+    nearest = min(levels, key=distance_to_zone)
+
+    if distance_to_zone(nearest) > tolerance:
+        return None
+
+    return {
+        "level": nearest,
+        "type": "Support" if direction == "BUY" else "Resistance",
+    }
 
 # ------------------------- CRT HELPERS ----------------------
 
@@ -273,7 +313,13 @@ def detect_crt_setup(candles_15m, candles_4h, direction):
     zone = zone_after_choch(candles_15m, direction, sweep_index, choch_index)
     if zone is None:
         return None, "No valid 15M Order Block or FVG after CHoCH."
+sr = find_support_resistance(candles_4h, direction, zone)
 
+if sr is None:
+    return None, (
+        f"No nearby 4H {'Support' if direction == 'BUY' else 'Resistance'} "
+        "confirmation."
+    )
     # The zone must be revisited by a later closed candle. The latest
     # candle must be a separate confirmation candle after that retest.
     retest_index = None
@@ -336,13 +382,14 @@ def detect_crt_setup(candles_15m, candles_4h, direction):
         "zone_type": zone["kind"],
         "crt_high": range_high,
         "crt_low": range_low,
+        "sr_type": sr["type"],
+        "sr_level": sr["level"],
         "signal_time": confirmation["time"].isoformat(),
         "signal_key": (
             f"{confirmation['time'].isoformat()}|{direction}|"
             f"{zone['kind']}|{zone['low']:.6f}|{zone['high']:.6f}"
         ),
     }, ""
-
 
 # ------------------------- NEWS FILTER ----------------------
 
@@ -553,7 +600,8 @@ def format_signal(signal):
         f"{signal['crt_high']:.{decimals}f}\n"
         f"Entry zone: {signal['zone_low']:.{decimals}f} – "
         f"{signal['zone_high']:.{decimals}f}\n\n"
-        f"Entry: {signal['entry']:.{decimals}f}\n"
+     f"{signal['sr_type']}: {signal['sr_level']:.{decimals}f}\n" 
+  f"Entry: {signal['entry']:.{decimals}f}\n"
         f"Stop Loss: {signal['stop_loss']:.{decimals}f}\n"
         f"Take Profit: {signal['take_profit']:.{decimals}f}\n\n"
         f"Risk plan: {RISK_PERCENT:.1f}% | RR 1:{REWARD_RISK:.0f}\n"
@@ -561,7 +609,6 @@ def format_signal(signal):
         "Manual trading only. Check the price on Exness before entry.\n"
         "Data source: Yahoo Finance; price may differ from Exness."
     )
-
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     CHAT_IDS.add(update.effective_chat.id)
