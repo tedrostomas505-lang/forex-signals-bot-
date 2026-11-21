@@ -314,14 +314,13 @@ def detect_crt_setup(candles_15m, candles_4h, direction):
     if zone is None:
         return None, "No valid 15M Order Block or FVG after CHoCH."
 sr = find_support_resistance(candles_4h, direction, zone)
+    if sr is None:
+        return None, (
+            f"No nearby 4H {'Support' if direction == 'BUY' else 'Resistance'} "
+            "confirmation."
+        )
 
-if sr is None:
-    return None, (
-        f"No nearby 4H {'Support' if direction == 'BUY' else 'Resistance'} "
-        "confirmation."
-    )
-    # The zone must be revisited by a later closed candle. The latest
-    # candle must be a separate confirmation candle after that retest.
+    # Wait for a retest, then a separate confirmation candle.
     retest_index = None
     for i in range(choch_index + 1, len(candles_15m) - 1):
         candle = candles_15m[i]
@@ -390,7 +389,6 @@ if sr is None:
             f"{zone['kind']}|{zone['low']:.6f}|{zone['high']:.6f}"
         ),
     }, ""
-
 # ------------------------- NEWS FILTER ----------------------
 
 def get_high_impact_events():
